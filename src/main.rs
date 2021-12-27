@@ -54,9 +54,27 @@ const HELP: &str = unsafe {
 ///
 /// Users are not likely to encouter diagnostics with these commands anyway however, so it's fine
 /// to not attempt to cut off their output.
-const SHOWS_DIAGNOSTICS: &[&str] = &[
-    "b", "bench", "build", "c", "check", "clippy", "d", "doc", "fix", "init", "miri", "r", "run",
-    "rustc", "rustdoc", "t", "test",
+const SHOWS_DIAGNOSTICS: &[&[&str]] = &[
+    &["b"],
+    &["bench"],
+    &["build"],
+    &["c"],
+    &["check"],
+    &["clippy"],
+    &["d"],
+    &["doc"],
+    &["fix"],
+    &["init"],
+    &["miri", "r"],
+    &["miri", "run"],
+    &["miri", "t"],
+    &["miri", "test"],
+    &["r"],
+    &["run"],
+    &["rustc"],
+    &["rustdoc"],
+    &["t"],
+    &["test"],
 ];
 
 const SPECIAL_ARGS: &[&str] = &["--help", "-h", "--version", "-V"];
@@ -64,7 +82,7 @@ const SPECIAL_ARGS: &[&str] = &["--help", "-h", "--version", "-V"];
 #[derive(Debug, PartialEq)]
 struct Opts {
     max_height: MaxHeight,
-    subcommand: String,
+    subcommand: Vec<String>,
     subcommand_args: Vec<String>,
 }
 
@@ -112,9 +130,11 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
 
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
 
-    command.arg(&opts.subcommand);
+    command.args(&opts.subcommand);
 
-    if SHOWS_DIAGNOSTICS.contains(&&*opts.subcommand)
+    if SHOWS_DIAGNOSTICS
+        .iter()
+        .any(|&subcommand| subcommand == opts.subcommand)
         && opts
             .subcommand_args
             .iter()
@@ -237,6 +257,15 @@ fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>
         }
     };
 
+    let subcommand = if subcommand != "miri" {
+        vec![subcommand]
+    } else if let Some(miri_subcommand) = args.next() {
+        vec![subcommand, miri_subcommand]
+    } else {
+        // Allow Miri to show its own error here.
+        vec![subcommand]
+    };
+
     Ok(Some(Opts {
         max_height: max_height.unwrap_or_default(),
         subcommand,
@@ -270,7 +299,7 @@ mod tests {
         let opts = parse_opts(["", "--max-height", "10", "check"]).unwrap();
         assert_eq!(opts, parse_opts(["", "--max-height=10", "check"]).unwrap());
         assert_eq!(opts.max_height, MaxHeight::Absolute(10));
-        assert_eq!(opts.subcommand, "check");
+        assert_eq!(opts.subcommand, ["check"]);
         assert_eq!(opts.subcommand_args, <Vec<String>>::new());
     }
 
@@ -279,7 +308,7 @@ mod tests {
         let opts = parse_opts(["", "--lines-around", "2", "check"]).unwrap();
         assert_eq!(opts, parse_opts(["", "--lines-around=2", "check"]).unwrap());
         assert_eq!(opts.max_height, MaxHeight::LinesAround(2));
-        assert_eq!(opts.subcommand, "check");
+        assert_eq!(opts.subcommand, ["check"]);
         assert_eq!(opts.subcommand_args, <Vec<String>>::new());
     }
 
@@ -287,14 +316,25 @@ mod tests {
     fn subcommand_args() {
         let opts = parse_opts(["", "sub", "-arg1", "arg2"]).unwrap();
         assert_eq!(opts.max_height, MaxHeight::LinesAround(4));
-        assert_eq!(opts.subcommand, "sub");
+        assert_eq!(opts.subcommand, ["sub"]);
         assert_eq!(opts.subcommand_args, vec!["-arg1", "arg2"]);
     }
 
     #[test]
     fn double_dash() {
-        let opts = parse_opts(["", "--", "--sub"]).unwrap();
-        assert_eq!(opts.subcommand, "--sub");
+        let opts = parse_opts(["", "--", "--lines-around=3"]).unwrap();
+        assert_eq!(opts.subcommand, ["--lines-around=3"]);
+        assert_eq!(opts.subcommand_args, <Vec<String>>::new());
+    }
+
+    #[test]
+    fn miri() {
+        let opts = parse_opts(["", "miri", "subcommand", "args"]).unwrap();
+        assert_eq!(opts.subcommand, ["miri", "subcommand"]);
+        assert_eq!(opts.subcommand_args, ["args"]);
+
+        let opts = parse_opts(["", "--", "miri", "subcommand"]).unwrap();
+        assert_eq!(opts.subcommand, ["miri", "subcommand"]);
         assert_eq!(opts.subcommand_args, <Vec<String>>::new());
     }
 
