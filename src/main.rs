@@ -121,13 +121,6 @@ fn main() {
 }
 
 fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
-    let (Width(width), Height(height)) = terminal_size().context("could not get terminal size")?;
-
-    let max_height = match opts.max_height {
-        MaxHeight::Absolute(max_height) => max_height,
-        MaxHeight::LinesAround(lines) => height.saturating_sub(lines),
-    };
-
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
 
     command.args(&opts.subcommand);
@@ -185,6 +178,14 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
         }
 
         if !diagnostics.is_empty() {
+            let (Width(width), Height(height)) =
+                terminal_size().context("could not get terminal size")?;
+
+            let max_height = match opts.max_height {
+                MaxHeight::Absolute(max_height) => max_height,
+                MaxHeight::LinesAround(lines) => height.saturating_sub(lines),
+            };
+
             let lines = textwrap::wrap(&diagnostics, usize::from(width));
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
