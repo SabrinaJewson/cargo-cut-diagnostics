@@ -155,8 +155,22 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
             buf.clear();
         }
 
-        // Now that Cargo has finished emitting its diagnostics, pipe the rest of stdout directly.
-        io::copy(&mut stdout, &mut io::stdout().lock())?;
+        // Now that Cargo has finished emitting its diagnostics, pipe the rest of stdout directly,
+        // keeping track of how many lines have been emitted.
+        let mut emitted_lines = 0;
+        let mut real_stdout = io::stdout().lock();
+        loop {
+            let buf = match stdout.fill_buf() {
+                Ok([]) => break,
+                Ok(buf) => buf,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => bail!(e),
+            };
+            emitted_lines += memchr_iter(b'\n', buf).count();
+            real_stdout.write_all(buf)?;
+            let len = buf.len();
+            stdout.consume(len);
+        }
 
         // Removing trailing newlines avoids double-newlines at the end of the output.
         if diagnostics.ends_with('\n') {
@@ -171,11 +185,11 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
                 MaxHeight::Absolute(max_height) => max_height,
                 MaxHeight::LinesAround(lines) => height.saturating_sub(lines),
             };
+            let max_height = usize::from(max_height).saturating_sub(emitted_lines);
 
             let lines = textwrap::wrap(&diagnostics, usize::from(width));
-            let stderr = io::stderr();
-            let mut stderr = stderr.lock();
-            for line in &lines[..cmp::min(lines.len(), usize::from(max_height))] {
+            let mut stderr = io::stderr().lock();
+            for line in lines.iter().take(max_height) {
                 writeln!(stderr, "{}", line)?;
             }
         }
@@ -339,7 +353,7 @@ use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context as _;
 use cargo_metadata::Message;
-use std::cmp;
+use memchr::memchr_iter;
 use std::io;
 use std::io::BufRead as _;
 use std::io::BufReader;
