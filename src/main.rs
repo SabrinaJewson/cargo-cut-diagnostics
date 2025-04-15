@@ -180,8 +180,10 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
     let mut child = command.spawn().context("starting cargo command")?;
     let stdout = child.stdout.take().unwrap();
 
-    // Read all the diagnostics from the command's stdout.
+    // Read all the diagnostics from the command's stdout. Make sure we eliminate duplicates, using
+    // the same technique as Cargo: https://github.com/rust-lang/cargo/issues/9104
     let mut stdout = BufReader::new(stdout);
+    let mut seen_diagnostics = HashSet::new();
     let mut diagnostics = String::new();
 
     let mut buf = String::new();
@@ -192,7 +194,9 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
                     .message
                     .rendered
                     .context("rustc did not provide rendered message")?;
-                diagnostics.push_str(&rendered);
+                if seen_diagnostics.insert(hash(&rendered)) {
+                    diagnostics.push_str(&rendered);
+                }
             }
             Ok(Message::BuildFinished(_)) => break,
             Ok(_) => {}
@@ -364,6 +368,12 @@ fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>
     }))
 }
 
+fn hash(s: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{MaxHeight, Opts};
@@ -444,7 +454,11 @@ use anyhow::ensure;
 use anyhow::Context as _;
 use cargo_metadata::Message;
 use memchr::memchr_iter;
+use std::collections::HashSet;
 use std::env;
+use std::hash::DefaultHasher;
+use std::hash::Hash as _;
+use std::hash::Hasher;
 use std::io;
 use std::io::BufRead as _;
 use std::io::BufReader;
