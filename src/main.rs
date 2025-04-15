@@ -121,9 +121,12 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
             .all(|arg| !SPECIAL_ARGS.contains(&&**arg))
     {
         command.arg("--message-format=json-diagnostic-rendered-ansi");
-        // Unfortunately this will disable colors for `cargo test` and `cargo run`. We can't just
-        // pass `--color=always` in because they might not be using the default test harness.
         command.stdout(Stdio::piped());
+        // Force colors to be used even though stdout is not a tty (and thus by default colors would
+        // not be used). As of 2025-04-15 libtest doesn't respect this environment variable, but I
+        // opened a PR for that: https://github.com/rust-lang/rust/pull/139864. Binaries run
+        // through `cargo run` should ideally respect this.
+        command.env("CLICOLOR_FORCE", "1");
     }
 
     command.args(&opts.subcommand_args);
