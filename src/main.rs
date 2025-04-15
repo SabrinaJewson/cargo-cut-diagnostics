@@ -15,6 +15,10 @@ OPTIONS:
         Set the number of lines around the diagnostics. The maximum height of
         the diagnostics will be the terminal height minus this value. Defaults
         to 4. Mutually exclusive with --max-height.
+    --width width
+        Set how many characters wide the terminal will be considered to be for
+        the purposes of calculating diagnostic height. Defaults to the width of
+        the terminal.
     --help, -h
         Display this help message and exit.
     --
@@ -29,8 +33,7 @@ EXAMPLES:
 "#;
 const HELP: &str = HELP_INNER.trim_ascii_start();
 
-/// A list of Cargo subcommands that show diagnostics and support
-/// `--message-format=json-diagnostic-rendered-ansi`.
+/// A list of Cargo subcommands that show diagnostics and support `--message-format`.
 ///
 /// Some Cargo subcommands can show diagnostics but do not support that option:
 /// - `cargo fmt`
@@ -63,10 +66,22 @@ const SHOWS_DIAGNOSTICS: &[&[&str]] = &[
     &["test"],
 ];
 
-const SPECIAL_ARGS: &[&str] = &["--help", "-h", "--version", "-V"];
+/// A list of Cargo subcommands that show diagnostics, run an executable, and support `--quiet` and
+/// `--no-run`. The `run` and `r` commands themselves are special-cased.
+const SUPPORTS_NO_RUN: &[&[&str]] = &[
+    &["b"],
+    &["bench"],
+    &["miri", "t"],
+    &["miri", "test"],
+    &["t"],
+    &["test"],
+];
+
+const SPECIAL_FLAGS: &[&str] = &["--help", "-h", "--version", "-V"];
 
 #[derive(Debug, PartialEq)]
 struct Opts {
+    width: Option<NonZero<u16>>,
     max_height: MaxHeight,
     subcommand: Vec<String>,
     subcommand_args: Vec<String>,
@@ -85,7 +100,7 @@ impl Default for MaxHeight {
 }
 
 fn main() {
-    let opts = match parse_opts(std::env::args()) {
+    let opts = match parse_opts(env::args()) {
         Ok(Some(opts)) => opts,
         Ok(None) => {
             print!("{}", HELP);
@@ -107,73 +122,122 @@ fn main() {
 }
 
 fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
-    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
-    command.args(&opts.subcommand);
+    let subcommand_flags = opts.subcommand_args.iter().take_while(|arg| *arg != "--");
 
-    if SHOWS_DIAGNOSTICS
+    // First, only do anything at all if
+    // - the command supports `--message-format`, and
+    // - we're not running something like `build --help`.
+    let should_override = SHOWS_DIAGNOSTICS
         .iter()
         .any(|&subcommand| subcommand == opts.subcommand)
-        && opts
-            .subcommand_args
-            .iter()
-            .take_while(|arg| *arg != "--")
-            .all(|arg| !SPECIAL_ARGS.contains(&&**arg))
-    {
-        command.arg("--message-format=json-diagnostic-rendered-ansi");
-        command.stdout(Stdio::piped());
-        // Force colors to be used even though stdout is not a tty (and thus by default colors would
-        // not be used). As of 2025-04-15 libtest doesn't respect this environment variable, but I
-        // opened a PR for that: https://github.com/rust-lang/rust/pull/139864. Binaries run
-        // through `cargo run` should ideally respect this.
-        command.env("CLICOLOR_FORCE", "1");
+        && subcommand_flags
+            .clone()
+            .all(|arg| !SPECIAL_FLAGS.contains(&&**arg));
+
+    if !should_override {
+        return Command::new(cargo)
+            .args(&opts.subcommand)
+            .args(&opts.subcommand_args)
+            .status()
+            .context("starting passthrough Cargo command");
     }
 
+    let mut command = Command::new(cargo.clone());
+
+    // If the command normally runs an executable and we can avoid running that executable, then do
+    // that. This is so that running the executable can inherit the TTY instead of thinking that
+    // stdout is a pipe. Note that we don't cut the warnings diagnostics in this case, but that is
+    // probably what the user wants.
+    let supports_no_run = SUPPORTS_NO_RUN
+        .iter()
+        .any(|&subcommand| subcommand == opts.subcommand)
+        && subcommand_flags.clone().all(|flag| flag != "--no-run");
+    let no_run = if supports_no_run {
+        command.args(&opts.subcommand);
+        command.arg("--no-run");
+        true
+    } else if opts.subcommand == ["run"] || opts.subcommand == ["r"] {
+        command.arg("build");
+        true
+    } else {
+        command.args(&opts.subcommand);
+        false
+    };
+
+    let color = env::var_os("NO_COLOR").is_none()
+        && (env::var_os("CLICOLOR_FORCE").is_some() || io::stdout().is_terminal());
+
+    command.arg(if color {
+        "--message-format=json-diagnostic-rendered-ansi"
+    } else {
+        "--message-format=json"
+    });
+    command.stdout(Stdio::piped());
     command.args(&opts.subcommand_args);
 
-    let mut child = command.spawn().context("could not start cargo command")?;
+    let mut child = command.spawn().context("starting cargo command")?;
+    let stdout = child.stdout.take().unwrap();
 
-    // `child.stdout` can be `None` if it doesn't show diagnostics.
-    if let Some(stdout) = child.stdout.take() {
-        let mut stdout = BufReader::new(stdout);
+    // Read all the diagnostics from the command's stdout.
+    let mut stdout = BufReader::new(stdout);
+    let mut diagnostics = String::new();
 
-        let mut diagnostics = String::new();
-
-        let mut buf = String::new();
-        while stdout.read_line(&mut buf)? > 0 {
-            match serde_json::from_str(&buf) {
-                Ok(Message::CompilerMessage(msg)) => {
-                    let rendered = msg
-                        .message
-                        .rendered
-                        .context("rustc did not provide rendered message")?;
-                    diagnostics.push_str(&rendered);
-                }
-                Ok(Message::BuildFinished(_)) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    bail!(anyhow!(e).context("could not deserialize Cargo message"));
-                }
+    let mut buf = String::new();
+    while stdout.read_line(&mut buf)? > 0 {
+        match serde_json::from_str(&buf) {
+            Ok(Message::CompilerMessage(msg)) => {
+                let rendered = msg
+                    .message
+                    .rendered
+                    .context("rustc did not provide rendered message")?;
+                diagnostics.push_str(&rendered);
             }
-            buf.clear();
+            Ok(Message::BuildFinished(_)) => break,
+            Ok(_) => {}
+            Err(e) => {
+                bail!(anyhow!(e).context("could not deserialize Cargo message"));
+            }
         }
+        buf.clear();
+    }
 
-        // Now that Cargo has finished emitting its diagnostics, pipe the rest of stdout directly,
-        // keeping track of how many lines have been emitted.
-        let mut emitted_lines = 0;
-        let mut real_stdout = io::stdout().lock();
-        loop {
-            let buf = match stdout.fill_buf() {
-                Ok([]) => break,
-                Ok(buf) => buf,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => bail!(e),
-            };
-            emitted_lines += memchr_iter(b'\n', buf).count();
-            real_stdout.write_all(buf)?;
-            let len = buf.len();
-            stdout.consume(len);
-        }
+    // Most Cargo commands shouldn't be printing stuff that isn't diagnostics to stdout, since
+    // we pass in `--no-run` for the commands that support it. The exception is things like
+    // `cargo miri run`, since there's no `cargo miri build`; in this case, we print the
+    // diagnostics after the command has finished instead of the usual before. We keep track of how
+    // many newlines are printed to avoid overflowing the terminal height.
+    let mut emitted_lines = 0;
+    let mut real_stdout = io::stdout().lock();
+    loop {
+        let buf = match stdout.fill_buf() {
+            Ok([]) => break,
+            Ok(buf) => buf,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => bail!(e),
+        };
+        emitted_lines += memchr_iter(b'\n', buf).count();
+        real_stdout.write_all(buf)?;
+        let len = buf.len();
+        stdout.consume(len);
+    }
+
+    // Stdout is closed, so wait for the child to finish before printing diagnostics.
+    let status = child.wait()?;
+
+    if status.success() && no_run {
+        // If we succeeded and now need to actually run the binary/tests/benchmarks, then we
+        // swallow diagnostics because they're just warnings and will be printed again when we run
+        // the normal command (even with --quiet).
+        Command::new(cargo)
+            .args(&opts.subcommand)
+            .arg("--quiet")
+            .args(&opts.subcommand_args)
+            .status()
+            .context("starting quiet Cargo command")
+    } else {
+        // Otherwise, there are errors to print and nothing else to run.
 
         // Removing trailing newlines avoids double-newlines at the end of the output.
         if diagnostics.ends_with('\n') {
@@ -181,24 +245,40 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
         }
 
         if !diagnostics.is_empty() {
-            let (terminal_size::Width(width), terminal_size::Height(height)) =
-                terminal_size().context("could not get terminal size")?;
+            let mut stderr = io::stderr().lock();
+
+            let mut terminal_size = None;
+            let mut get_terminal_size = || -> anyhow::Result<_> {
+                Ok(match terminal_size {
+                    Some(size) => size,
+                    None => {
+                        let (terminal_size::Width(width), terminal_size::Height(height)) =
+                            terminal_size_of(&stderr).context("could not get terminal size")?;
+                        terminal_size = Some((width, height));
+                        (width, height)
+                    }
+                })
+            };
+
+            let width = match opts.width {
+                Some(width) => width.get(),
+                None => get_terminal_size()?.0,
+            };
 
             let max_height = match opts.max_height {
                 MaxHeight::Absolute(max_height) => max_height,
-                MaxHeight::LinesAround(lines) => height.saturating_sub(lines),
+                MaxHeight::LinesAround(lines) => get_terminal_size()?.1.saturating_sub(lines),
             };
             let max_height = usize::from(max_height).saturating_sub(emitted_lines);
 
             let lines = textwrap::wrap(&diagnostics, usize::from(width));
-            let mut stderr = io::stderr().lock();
             for line in lines.iter().take(max_height) {
                 writeln!(stderr, "{}", line)?;
             }
         }
-    }
 
-    Ok(child.wait()?)
+        Ok(status)
+    }
 }
 
 fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>> {
@@ -207,6 +287,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>
     args.next_if(|x| x.as_str() == "cut-diagnostics");
 
     let mut max_height = None;
+    let mut width = None;
 
     let subcommand = loop {
         let arg = args.next().context("no subcommand given")?;
@@ -251,6 +332,12 @@ fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>
                     .context("argument to --lines-around not a number")?;
                 max_height = Some(MaxHeight::LinesAround(lines_around));
             }
+            "--width" => {
+                ensure!(width.is_none(), "--width given more than once");
+                let value = value();
+                ensure!(!value.is_empty(), "argument to --width missing");
+                width = Some(value.parse().context("argument to --width invalid")?);
+            }
             "--help" | "-h" => {
                 return Ok(None);
             }
@@ -271,6 +358,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> anyhow::Result<Option<Opts>
     };
 
     Ok(Some(Opts {
+        width,
         max_height: max_height.unwrap_or_default(),
         subcommand,
         subcommand_args: args.collect(),
@@ -357,12 +445,15 @@ use anyhow::ensure;
 use anyhow::Context as _;
 use cargo_metadata::Message;
 use memchr::memchr_iter;
+use std::env;
 use std::io;
 use std::io::BufRead as _;
 use std::io::BufReader;
+use std::io::IsTerminal;
 use std::io::Write as _;
+use std::num::NonZero;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::str;
-use terminal_size::terminal_size;
+use terminal_size::terminal_size_of;
