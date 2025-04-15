@@ -1,12 +1,4 @@
-use anyhow::{anyhow, bail, ensure, Context};
-use cargo_metadata::Message;
-use std::{
-    cmp,
-    io::{self, BufRead, BufReader, Write},
-    process::{Command, ExitStatus, Stdio},
-    str,
-};
-use terminal_size::{terminal_size, Height, Width};
+#![allow(clippy::items_after_test_module)]
 
 const HELP_INNER: &str = r#"
 Cargo subcommand that displays only the first page of diagnostics.
@@ -172,7 +164,7 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
         }
 
         if !diagnostics.is_empty() {
-            let (Width(width), Height(height)) =
+            let (terminal_size::Width(width), terminal_size::Height(height)) =
                 terminal_size().context("could not get terminal size")?;
 
             let max_height = match opts.max_height {
@@ -341,3 +333,19 @@ mod tests {
         assert_eq!(parse_opts(["", "-h", "subcommand", "args"]), None);
     }
 }
+
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::Context as _;
+use cargo_metadata::Message;
+use std::cmp;
+use std::io;
+use std::io::BufRead as _;
+use std::io::BufReader;
+use std::io::Write as _;
+use std::process::Command;
+use std::process::ExitStatus;
+use std::process::Stdio;
+use std::str;
+use terminal_size::terminal_size;
