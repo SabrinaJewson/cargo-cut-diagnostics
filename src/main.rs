@@ -66,8 +66,8 @@ const SHOWS_DIAGNOSTICS: &[&[&str]] = &[
     &["test"],
 ];
 
-/// A list of Cargo subcommands that show diagnostics, run an executable, and support `--quiet` and
-/// `--no-run`. The `run` and `r` commands themselves are special-cased.
+/// A list of Cargo subcommands that show diagnostics, run an executable, and support `--no-run`.
+/// The `run` and `r` commands themselves are special-cased.
 const SUPPORTS_NO_RUN: &[&[&str]] = &[
     &["b"],
     &["bench"],
@@ -229,13 +229,12 @@ fn cargo_cut_diagnostics(opts: Opts) -> anyhow::Result<ExitStatus> {
     if status.success() && no_run {
         // If we succeeded and now need to actually run the binary/tests/benchmarks, then we
         // swallow diagnostics because they're just warnings and will be printed again when we run
-        // the normal command (even with --quiet).
+        // the normal command.
         Command::new(cargo)
             .args(&opts.subcommand)
-            .arg("--quiet")
             .args(&opts.subcommand_args)
             .status()
-            .context("starting quiet Cargo command")
+            .context("starting runner Cargo command")
     } else {
         // Otherwise, there are errors to print and nothing else to run.
 
