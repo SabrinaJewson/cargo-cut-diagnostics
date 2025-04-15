@@ -8,7 +8,7 @@ use std::{
 };
 use terminal_size::{terminal_size, Height, Width};
 
-const HELP_INNER: &[u8] = br#"
+const HELP_INNER: &str = r#"
 Cargo subcommand that displays only the first page of diagnostics.
 
 USAGE:
@@ -35,13 +35,7 @@ EXAMPLES:
     Run clippy on every target in the package:
         cargo cut-diagnostics clippy --all-targets
 "#;
-const HELP: &str = unsafe {
-    str::from_utf8_unchecked(if let [b'\n', tail @ ..] = HELP_INNER {
-        tail
-    } else {
-        unreachable!()
-    })
-};
+const HELP: &str = HELP_INNER.trim_ascii_start();
 
 /// A list of Cargo subcommands that show diagnostics and support
 /// `--message-format=json-diagnostic-rendered-ansi`.
